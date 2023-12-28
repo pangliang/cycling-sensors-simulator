@@ -43,26 +43,25 @@ from bumble.gatt import (
 
 class CyclingSensorsSimulator:
     def __init__(self):
-        self.power_min = 90
-        self.power_max = 280
-        self.power_change_fn = lambda: random.randint(5, 10)
-        self.power = 260
-        self.cadence = 72
+        self.power_target = 130
+        self.power_target_fn = lambda: random.choices([100, 130, 160, 200, 250, 300], weights=[50, 30, 10, 5, 3, 1])[0]
+        self.power_change = 5
+        self.power_change_fn = lambda: random.randint(5, 30)
+        self.power = 120
+        self.heart_rate_target = 130
+        self.heart_rate_target_fn = lambda power_target: {100: 130, 130: 145, 160: 160, 200: 170, 250: 185, 300: 185}[power_target]
         self.heart_rate = 100
-        self.heart_rate_min = 115
-        self.heart_rate_max = 185
-        self.heart_rate_change_fn = lambda: random.randint(1, 2)
-        self.heart_rate_up_or_down = 'none'
+        self.heart_rate_change = 2
+        self.heart_rate_change_fn = lambda power_change: 1 + (power_change / 10)
         self.heart_rate_step_length = 5
         self.accumulated_torque = 0
         self.accumulated_rpm = 0
         self.last_rpm_update_ts = time.time()
-        self.rpm = 80
-        self.rpm_min = 75
-        self.rpm_max = 95
-        self.rpm_change_fn = lambda: random.randint(1, 2)
-        self.up_or_down = 'up'
-        self.step_length = 10
+        self.cadence = 80
+        self.cadence_min = 75
+        self.cadence_max = 95
+        self.cadence_change_fn = lambda: random.randint(1, 2)
+        self.step_length = 0
         self.step_length_fn = lambda: random.randint(5, 15)
         self.battery_level = random.randint(50, 99)  # 每次启动后固定
 
@@ -71,11 +70,13 @@ class CyclingSensorsSimulator:
         if self.step_length > 0:
             self.step_length -= 1
         else:
-            # 确定方向
-            self.up_or_down = random.choice(('up', 'down', 'none'))
             # 确定步长
             self.step_length = self.step_length_fn()
-            logging.info("新的步长: %d, %s", self.step_length, self.up_or_down)
+            # 功率目标
+            self.power_target = self.power_target_fn()
+            # 功率变化
+            self.power_change = self.power_change_fn()
+            logging.info("新的步长:%d, 功率目标:%d, 功率变化:%s", self.step_length, self.power_target, self.power_change)
 
         # 检查心率步长是否结束
         if self.heart_rate_step_length > 0:
@@ -83,44 +84,38 @@ class CyclingSensorsSimulator:
         else:
             # 确定心率步长
             self.heart_rate_step_length = self.step_length + random.randint(5, 10)
-            # 确定心率方向
-            self.heart_rate_up_or_down = self.up_or_down
-            logging.info("新的心率步长: %d, %s", self.heart_rate_step_length, self.heart_rate_up_or_down)
+            # 心率目标
+            self.heart_rate_target = self.heart_rate_target_fn(self.power_target)
+            # 心率变化
+            self.heart_rate_change = self.heart_rate_change_fn(self.power_change)
+            logging.info("新的心率步长:%d, 心率目标:%d, 心率变化:%s", self.heart_rate_step_length, self.heart_rate_target, self.heart_rate_change)
 
         # 功率
-        if self.up_or_down == 'up':
-            self.power += self.power_change_fn()
-            if self.power > self.power_max:
-                self.power = self.power_max
-        elif self.up_or_down == 'down':
-            self.power -= self.power_change_fn()
-            if self.power < self.power_min:
-                self.power = self.power_min
+        if self.power < self.power_target:
+            self.power += self.power_change
+        elif self.power > self.power_target:
+            self.power -= self.power_change
 
         # 心率
-        if self.heart_rate_up_or_down == 'up':
-            self.heart_rate += self.heart_rate_change_fn()
-            if self.heart_rate > self.heart_rate_max:
-                self.heart_rate = self.heart_rate_max
-        elif self.heart_rate_up_or_down == 'down':
-            self.heart_rate -= self.heart_rate_change_fn()
-            if self.heart_rate < self.heart_rate_min:
-                self.heart_rate = self.heart_rate_min
+        if self.heart_rate < self.heart_rate_target:
+            self.heart_rate += self.heart_rate_change
+        elif self.heart_rate > self.heart_rate_target:
+            self.heart_rate -= self.heart_rate_change
 
-        # rpm
-        if self.up_or_down == 'up':
-            self.rpm += self.rpm_change_fn()
-            if self.rpm > self.rpm_max:
-                self.rpm = self.rpm_max
-        elif self.up_or_down == 'down':
-            self.rpm -= self.rpm_change_fn()
-            if self.rpm < self.rpm_min:
-                self.rpm = self.rpm_min
+        # cadence
+        if self.power < self.power_target:
+            self.cadence += self.cadence_change_fn()
+            if self.cadence > self.cadence_max:
+                self.cadence = self.cadence_max
+        elif self.power > self.power_target:
+            self.cadence -= self.cadence_change_fn()
+            if self.cadence < self.cadence_min:
+                self.cadence = self.cadence_min
 
     # https://bitbucket.org/bluetooth-SIG/public/src/main/gss/org.bluetooth.characteristic.heart_rate_measurement.yaml
     def read_heart_rate(self, connection) -> bytes:
         flags = 0b00
-        data = bytes([flags]) + struct.pack('B', self.heart_rate + random.randint(-5, 5))
+        data = bytes([flags]) + struct.pack('B', int(self.heart_rate) + random.randint(-5, 5))
         return data
 
     # https://bitbucket.org/bluetooth-SIG/public/src/main/gss/org.bluetooth.characteristic.cycling_power_measurement.yaml
@@ -147,7 +142,7 @@ class CyclingSensorsSimulator:
     def read_rpm(self, connection) -> bytes:
         now = time.time()
         old_rpm = self.accumulated_rpm
-        self.accumulated_rpm += self.rpm * (now - self.last_rpm_update_ts) / 60
+        self.accumulated_rpm += self.cadence * (now - self.last_rpm_update_ts) / 60
         self.accumulated_rpm %= 0xffff
         self.last_rpm_update_ts = now
         data = bytes()
