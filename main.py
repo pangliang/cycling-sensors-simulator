@@ -43,27 +43,90 @@ from bumble.gatt import (
 
 class CyclingSensorsSimulator:
     def __init__(self):
+        self.power_min = 90
+        self.power_max = 280
+        self.power_change_fn = lambda: random.randint(5, 10)
         self.power = 260
         self.cadence = 72
         self.heart_rate = 100
+        self.heart_rate_min = 115
+        self.heart_rate_max = 185
+        self.heart_rate_change_fn = lambda: random.randint(1, 2)
+        self.heart_rate_up_or_down = 'none'
+        self.heart_rate_step_length = 5
         self.accumulated_torque = 0
         self.accumulated_rpm = 0
         self.last_rpm_update_ts = time.time()
+        self.rpm = 80
+        self.rpm_min = 75
+        self.rpm_max = 95
+        self.rpm_change_fn = lambda: random.randint(1, 2)
+        self.up_or_down = 'up'
+        self.step_length = 10
+        self.step_length_fn = lambda: random.randint(5, 15)
         self.battery_level = random.randint(50, 99)  # 每次启动后固定
+
+    def loop(self):
+        # 检查步长是否结束
+        if self.step_length > 0:
+            self.step_length -= 1
+        else:
+            # 确定方向
+            self.up_or_down = random.choice(('up', 'down', 'none'))
+            # 确定步长
+            self.step_length = self.step_length_fn()
+            logging.info("新的步长: %d, %s", self.step_length, self.up_or_down)
+
+        # 检查心率步长是否结束
+        if self.heart_rate_step_length > 0:
+            self.heart_rate_step_length -= 1
+        else:
+            # 确定心率步长
+            self.heart_rate_step_length = self.step_length + random.randint(5, 10)
+            # 确定心率方向
+            self.heart_rate_up_or_down = self.up_or_down
+            logging.info("新的心率步长: %d, %s", self.heart_rate_step_length, self.heart_rate_up_or_down)
+
+        # 功率
+        if self.up_or_down == 'up':
+            self.power += self.power_change_fn()
+            if self.power > self.power_max:
+                self.power = self.power_max
+        elif self.up_or_down == 'down':
+            self.power -= self.power_change_fn()
+            if self.power < self.power_min:
+                self.power = self.power_min
+
+        # 心率
+        if self.heart_rate_up_or_down == 'up':
+            self.heart_rate += self.heart_rate_change_fn()
+            if self.heart_rate > self.heart_rate_max:
+                self.heart_rate = self.heart_rate_max
+        elif self.heart_rate_up_or_down == 'down':
+            self.heart_rate -= self.heart_rate_change_fn()
+            if self.heart_rate < self.heart_rate_min:
+                self.heart_rate = self.heart_rate_min
+
+        # rpm
+        if self.up_or_down == 'up':
+            self.rpm += self.rpm_change_fn()
+            if self.rpm > self.rpm_max:
+                self.rpm = self.rpm_max
+        elif self.up_or_down == 'down':
+            self.rpm -= self.rpm_change_fn()
+            if self.rpm < self.rpm_min:
+                self.rpm = self.rpm_min
 
     # https://bitbucket.org/bluetooth-SIG/public/src/main/gss/org.bluetooth.characteristic.heart_rate_measurement.yaml
     def read_heart_rate(self, connection) -> bytes:
         flags = 0b00
-        self.heart_rate = random.randint(155, 165)
-        data = bytes([flags]) + struct.pack('B', self.heart_rate)
+        data = bytes([flags]) + struct.pack('B', self.heart_rate + random.randint(-5, 5))
         return data
 
     # https://bitbucket.org/bluetooth-SIG/public/src/main/gss/org.bluetooth.characteristic.cycling_power_measurement.yaml
     def read_cycling_power(self, connection) -> bytes:
-        now = time.time()
 
-        self.power = random.randint(250, 300)
-        data = struct.pack('<H', int(self.power))
+        data = struct.pack('<h', int(self.power + random.randint(-20, 20)))
 
         # 有左右平衡
         flags = 0b01
@@ -74,20 +137,25 @@ class CyclingSensorsSimulator:
         # 有扭矩
         flags |= 0b100
         flags |= 0b1000  # 累积扭矩源 0 = 基于轮子 1 = 基于曲柄
-        self.accumulated_torque += 0.1  # random.randint(1, 1)
+        self.accumulated_torque += random.randint(1, 1)
         self.accumulated_torque %= 0xffff
         data += struct.pack('<H', int(self.accumulated_torque) & 0xffff)
 
-        target_rpm = random.randint(80, 95)  # 目标踏频
-        self.accumulated_rpm += (target_rpm * (now - self.last_rpm_update_ts) / 60)
-        self.accumulated_rpm %= 0xffff
-        flags |= 0b100000
-        data += struct.pack('<H', int(self.accumulated_rpm) & 0xffff)
-        data += struct.pack('<H', int(self.last_rpm_update_ts * 1024) & 0xffff)
-        self.last_rpm_update_ts = now
-        logging.info("read rpm: %d, %d", self.accumulated_rpm, self.last_rpm_update_ts)
-
         data = struct.pack('<H', flags) + data
+        return data
+
+    def read_rpm(self, connection) -> bytes:
+        now = time.time()
+        old_rpm = self.accumulated_rpm
+        self.accumulated_rpm += self.rpm * (now - self.last_rpm_update_ts) / 60
+        self.accumulated_rpm %= 0xffff
+        self.last_rpm_update_ts = now
+        data = bytes()
+        if int(self.accumulated_rpm) - int(old_rpm) >= 1:
+            data += bytes([0b10])
+            data += struct.pack('<H', int(self.accumulated_rpm) & 0xffff)
+            data += struct.pack('<H', int(self.last_rpm_update_ts * 1024) & 0xffff)
+
         return data
 
     def read_battery_level(self, connection) -> int:
@@ -236,6 +304,34 @@ async def main():
                 ),
             ]
         )
+        # GATT_CYCLING_SPEED_AND_CADENCE_SERVICE
+        cycling_speed_and_cadence_service = Service(
+            GATT_CYCLING_SPEED_AND_CADENCE_SERVICE, [
+                # 踏频
+                Characteristic(
+                    UUID.from_16_bits(0x2A5B, 'CSC Measurement'),
+                    Characteristic.Properties.NOTIFY,
+                    Characteristic.READABLE,
+                    CharacteristicValue(read=simulator.read_rpm),
+                ),
+                # 功能描述
+                # https://bitbucket.org/bluetooth-SIG/public/src/main/gss/org.bluetooth.characteristic.csc_feature.yaml
+                Characteristic(
+                    UUID.from_16_bits(0x2A5C, 'CSC Feature'),
+                    Characteristic.Properties.READ,
+                    Characteristic.READABLE,
+                    bytes([0x02, 0x00]),  # bit1: Crank Revolution Data Supported
+                ),
+                # 设备位置
+                # https://bitbucket.org/bluetooth-SIG/public/src/main/gss/org.bluetooth.characteristic.sensor_location.yaml
+                Characteristic(
+                    UUID.from_16_bits(0x2A5D, 'Sensor Location'),
+                    Characteristic.Properties.READ,
+                    Characteristic.READABLE,
+                    bytes([0x05]),
+                ),
+            ]
+        )
 
         battery_service = BatteryService(simulator.read_battery_level)
 
@@ -244,6 +340,7 @@ async def main():
             generic_access_service,
             heart_rate_service,
             cycling_power_service,
+            cycling_speed_and_cadence_service,
             battery_service
         ])
 
@@ -252,11 +349,13 @@ async def main():
         # Get things going
         await device.power_on()
         await device.start_advertising(auto_restart=True)
+
         while True:
             await asyncio.sleep(1)
+            simulator.loop()
             await device.notify_subscribers(heart_rate_service.characteristics[0])
             await device.notify_subscribers(cycling_power_service.characteristics[0])
-
+            await device.notify_subscribers(cycling_speed_and_cadence_service.characteristics[0])
 
 # -----------------------------------------------------------------------------
 logging.basicConfig(level=os.environ.get('BUMBLE_LOGLEVEL', 'INFO').upper())
