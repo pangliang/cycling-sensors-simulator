@@ -44,7 +44,7 @@ from bumble.gatt import (
 class CyclingSensorsSimulator:
     def __init__(self):
         self.power_target = 130
-        self.power_target_fn = lambda: random.choices([100, 130, 160, 200, 250, 300], weights=[50, 30, 10, 5, 3, 1])[0]
+        self.power_target_fn = lambda: random.choices([100, 130, 160, 200, 250, 300], weights=[10, 20, 30, 20, 5, 5])[0]
         self.power_change = 5
         self.power_change_fn = lambda: random.randint(5, 30)
         self.power = 120
@@ -62,7 +62,7 @@ class CyclingSensorsSimulator:
         self.cadence_max = 95
         self.cadence_change_fn = lambda: random.randint(2, 8)
         self.step_length = 0
-        self.step_length_fn = lambda: random.randint(5, 15)
+        self.step_length_fn = lambda: random.randint(5, 30)
         self.battery_level = random.randint(50, 99)  # 每次启动后固定
 
     def loop(self):
@@ -120,7 +120,7 @@ class CyclingSensorsSimulator:
 
     # https://bitbucket.org/bluetooth-SIG/public/src/main/gss/org.bluetooth.characteristic.cycling_power_measurement.yaml
     def read_cycling_power(self, connection) -> bytes:
-
+        now = time.time()
         data = struct.pack('<h', int(self.power + random.randint(-20, 20)))
 
         # 有左右平衡
@@ -130,11 +130,22 @@ class CyclingSensorsSimulator:
         data += struct.pack('b', balance)
 
         # # 有扭矩
-        # flags |= 0b100
-        # flags |= 0b1000  # 累积扭矩源 0 = 基于轮子 1 = 基于曲柄
-        # self.accumulated_torque += random.randint(1, 1)
-        # self.accumulated_torque %= 0xffff
-        # data += struct.pack('<H', int(self.accumulated_torque) & 0xffff)
+        flags |= 0b100
+        flags |= 0b1000  # 累积扭矩源 0 = 基于轮子 1 = 基于曲柄
+        self.accumulated_torque += random.randint(1, 1) * 34
+        self.accumulated_torque %= 0xffff
+        data += struct.pack('<H', int(self.accumulated_torque) & 0xffff)
+
+        while now - self.last_rpm_update_ts < 60 / self.cadence:
+            time.sleep(0.1)
+            now = time.time()
+        self.accumulated_rpm += 1  # self.cadence * (now - self.last_rpm_update_ts) / 60
+        self.accumulated_rpm %= 0xffff
+        flags |= 0b100000
+        data += struct.pack('<H', int(self.accumulated_rpm) & 0xffff)
+        data += struct.pack('<H', int(self.last_rpm_update_ts * 1024) & 0xffff)
+        self.last_rpm_update_ts = now
+
 
         data = struct.pack('<H', flags) + data
         return data
@@ -175,7 +186,8 @@ async def main():
                 [
                     (AdvertisingData.COMPLETE_LOCAL_NAME, bytes(config.name, 'utf-8')),
                     (AdvertisingData.INCOMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS, bytes(GATT_CYCLING_POWER_SERVICE)),
-                    (AdvertisingData.APPEARANCE, struct.pack('<H', 0x0340))
+                    (AdvertisingData.INCOMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS, bytes(GATT_CYCLING_SPEED_AND_CADENCE_SERVICE)),
+                    # (AdvertisingData.APPEARANCE, struct.pack('<H', 0x0340))
                 ]
             )
         )
@@ -290,7 +302,7 @@ async def main():
                     UUID.from_16_bits(0x2A65, 'Cycling Power Feature'),
                     Characteristic.Properties.READ,
                     Characteristic.READABLE,
-                    bytes([0b0001, 00, 80, 00]),  # bit0: 支持踏板功率平衡, bit1: 支持扭矩, bit3: 支持踏频
+                    bytes([0b1011, 00, 80, 00]),  # bit0: 支持踏板功率平衡, bit1: 支持扭矩, bit3: 支持踏频
                 ),
                 # 设备位置
                 # https://bitbucket.org/bluetooth-SIG/public/src/main/gss/org.bluetooth.characteristic.sensor_location.yaml
@@ -359,12 +371,12 @@ async def main():
             while True:
                 await asyncio.sleep(1)
                 simulator.loop()
-                await device.notify_subscribers(heart_rate_service.characteristics[0])
-                await device.notify_subscribers(cycling_power_service.characteristics[0])
 
         async def cadence_loop():
             while True:
                 await asyncio.sleep(0.2)
+                await device.notify_subscribers(heart_rate_service.characteristics[0])
+                await device.notify_subscribers(cycling_power_service.characteristics[0])
                 await device.notify_subscribers(cycling_speed_and_cadence_service.characteristics[0])
 
         await asyncio.gather(main_loop(), cadence_loop())
