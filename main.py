@@ -44,6 +44,8 @@ from bumble.gatt import (
 )
 from windows_toasts import AudioSource, Toast, ToastAudio, ToastDisplayImage, WindowsToaster
 
+from register_hkey_aumid import register_hkey
+
 
 class CyclingSensorsSimulator:
     def __init__(self):
@@ -51,31 +53,26 @@ class CyclingSensorsSimulator:
         self.choise_weights = [1, 3, 5, 3, 1]
         self.target_index_fn = lambda: random.choices([0, 1, 2, 3, 4], weights=self.choise_weights )[0]
         self.target_index = self.target_index_fn()
-        self.power_target_choices = [160, 200, 240, 280, 300]
+        self.power_target_choices = [140, 160, 200, 220, 240]
         self.heart_rate_target_choices = [135, 145, 165, 175, 180]
+        self.cadence_target_choices = [70, 75, 80, 85, 90]
 
         self.power_target = self.power_target_choices[0]
-        self.power_change = 5
-        self.power_change_fn = lambda: random.randint(1, 3)
+        self.power_change_fn = lambda: random.randint(1, 5)
         self.power = self.power_target
 
         self.heart_rate_target = self.heart_rate_target_choices[0]
         self.heart_rate = self.heart_rate_target
-        self.heart_rate_change_fn = lambda: random.randint(1, 5)
-        self.heart_rate_change = self.heart_rate_change_fn()
+        self.heart_rate_change_fn = lambda: random.randint(1, 2)
         self.heart_rate_step_length = 5
 
         self.accumulated_torque = 0
         self.accumulated_rpm = 0
         self.last_rpm_update_ts = time.time()
 
-        # self.cadence = 80
-        # self.cadence_min = 80
-        # self.cadence_max = 100
-        self.cadence = 60
-        self.cadence_min = 60
-        self.cadence_max = 70
-        self.cadence_change_fn = lambda: random.randint(1, 3)
+        self.cadence_target = self.cadence_target_choices[0]
+        self.cadence = self.cadence_target
+        self.cadence_change_fn = lambda: random.randint(1, 2)
 
         self.step_length = 0
         self.step_length_fn = lambda: random.randint(3, 15)
@@ -92,9 +89,9 @@ class CyclingSensorsSimulator:
             self.target_index = self.target_index_fn()
             # 功率目标
             self.power_target = self.power_target_choices[self.target_index]
-            # 功率变化
-            self.power_change = self.power_change_fn()
-            logging.info("新的步长:%d, 功率目标:%d, 功率变化:%s", self.step_length, self.power_target, self.power_change)
+            # 踏频目标
+            self.cadence_target = self.cadence_target_choices[self.target_index]
+            logging.info("功率步长:%d, 功率目标:%d, 踏频目标:%d", self.step_length, self.power_target, self.cadence_target)
 
         # 检查心率步长是否结束
         if self.heart_rate_step_length > 0:
@@ -104,31 +101,25 @@ class CyclingSensorsSimulator:
             self.heart_rate_step_length = self.step_length + random.randint(5, 10)
             # 心率目标
             self.heart_rate_target = self.heart_rate_target_choices[self.target_index]
-            # 心率变化
-            self.heart_rate_change = self.heart_rate_change_fn()
-            logging.info("新的心率步长:%d, 心率目标:%d, 心率变化:%s", self.heart_rate_step_length, self.heart_rate_target, self.heart_rate_change)
+            logging.info("心率步长:%d, 心率目标:%d", self.heart_rate_step_length, self.heart_rate_target)
 
         # 功率
         if self.power < self.power_target:
-            self.power += self.power_change
+            self.power += self.power_change_fn()
         elif self.power > self.power_target:
-            self.power -= self.power_change
+            self.power -= self.power_change_fn()
 
         # 心率
         if self.heart_rate < self.heart_rate_target:
-            self.heart_rate += self.heart_rate_change
+            self.heart_rate += self.heart_rate_change_fn()
         elif self.heart_rate > self.heart_rate_target:
-            self.heart_rate -= self.heart_rate_change
+            self.heart_rate -= self.heart_rate_change_fn()
 
         # cadence
-        if self.power < self.power_target:
+        if self.cadence < self.cadence_target:
             self.cadence += self.cadence_change_fn()
-            if self.cadence > self.cadence_max:
-                self.cadence = self.cadence_max
-        elif self.power > self.power_target:
+        elif self.cadence > self.cadence_target:
             self.cadence -= self.cadence_change_fn()
-            if self.cadence < self.cadence_min:
-                self.cadence = self.cadence_min
 
     # https://bitbucket.org/bluetooth-SIG/public/src/main/gss/org.bluetooth.characteristic.heart_rate_measurement.yaml
     def read_heart_rate(self, connection) -> bytes:
@@ -171,16 +162,15 @@ class CyclingSensorsSimulator:
     def read_cadence(self, connection) -> bytes:
         now = time.time()
         while now - self.last_rpm_update_ts < 60 / self.cadence:
-            time.sleep(0.1)
+            time.sleep(0.05)
             now = time.time()
 
-        self.accumulated_rpm += 1  # self.cadence * (now - self.last_rpm_update_ts) / 60
+        self.accumulated_rpm += 1
         self.accumulated_rpm %= 0xffff
+        self.last_rpm_update_ts = now
         data = bytes([0b10])
         data += struct.pack('<H', int(self.accumulated_rpm) & 0xffff)
         data += struct.pack('<H', int(self.last_rpm_update_ts * 1024) & 0xffff)
-        self.last_rpm_update_ts = now
-        # logging.info("cadence:%d, accumulated_rpm:%f, last_rpm_update_ts:%f", self.cadence, self.accumulated_rpm, self.last_rpm_update_ts)
         return data
 
     def read_battery_level(self, connection) -> int:
@@ -405,7 +395,7 @@ async def main():
         await device.stop_advertising()
         await device.power_off()
 
-        toaster = WindowsToaster('cycling-sensors-simulator')
+        toaster = WindowsToaster(app_name)
         newToast = Toast()
         newToast.text_fields = ['程序即将退出!']
         newToast.AddImage(ToastDisplayImage.fromPath(os.path.abspath(os.path.join(os.path.dirname(__file__), "icon.ico"))))
@@ -415,30 +405,6 @@ async def main():
 # -----------------------------------------------------------------------------
         
 app_name = "cycling-sensors-simulator"
-def register_hkey(appId: str, appName: str, iconPath: Optional[pathlib.Path]):
-    """
-    Registers an application in the Windows registry.
-
-    :param app_id: The unique ID of the application.
-    :param app_name: The display name of the application.
-    :param icon_path: The path to the application's icon (optional).
-    :raises ValueError: If the icon path does not exist or is not an .ico file.
-    """
-    if iconPath is not None:
-        if not iconPath.exists():
-            raise ValueError(f"Could not register the application: File {iconPath} does not exist")
-        elif iconPath.suffix != ".ico":
-            raise ValueError(f"Could not register the application: File {iconPath} must be of type .ico")
-
-    winreg.ConnectRegistry(None, winreg.HKEY_CURRENT_USER)
-    keyPath = f"SOFTWARE\\Classes\\AppUserModelId\\{appId}"
-    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, keyPath) as masterKey:
-        winreg.SetValueEx(masterKey, "DisplayName", 0, winreg.REG_SZ, appName)
-        if iconPath is not None:
-            winreg.SetValueEx(masterKey, "IconUri", 0, winreg.REG_SZ, str(iconPath.resolve()))
-
-# 把应用注册到通知中心
-register_hkey(app_name, app_name, pathlib.Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "icon.ico"))))
 
 toaster = WindowsToaster(app_name)
 newToast = Toast()
